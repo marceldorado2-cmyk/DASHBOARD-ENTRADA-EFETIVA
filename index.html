@@ -579,6 +579,9 @@
       <!-- NOVA ABA (inclusão) -->
       <div class="tab" data-tab="individual-mes-mes">🗓️ Individual mês/mês</div>
 
+      <!-- NOVA ABA (inclusão) -->
+      <div class="tab" data-tab="entrada-efetiva">💳 Entrada Efetiva</div>
+
       <div class="tab" data-tab="desafios">🏁 Desafios</div>
       <div class="tab" data-tab="ranking-promotor">🎯 Ranking Promotor</div>
       <div class="tab" data-tab="ranking-liner">💬 Ranking Liner</div>
@@ -840,6 +843,55 @@
     </div>
 
     <!-- ══════════════════════════════════════════════════
+         NOVA ABA: ENTRADA EFETIVA
+    ══════════════════════════════════════════════════ -->
+    <div id="tab-entrada-efetiva" class="tab-content">
+      <div class="note">
+        <strong>Entrada Efetiva</strong><br>
+        Fonte: <strong>entrada_efetiva.csv</strong> + cruzamento com <strong>dados.csv</strong> (Promotor/Liner/Closer).<br>
+        KPIs iguais aos cards do print. Período usa a coluna <strong>PERÍODO</strong> (ex.: jun/26).
+      </div>
+
+      <div class="controls" style="margin-top:10px">
+        <div class="control-group">
+          <label>Período (Entrada Efetiva)</label>
+          <select id="eePeriodo"><option value="todos">Todos</option></select>
+        </div>
+        <div class="control-group">
+          <label>Agrupar por</label>
+          <select id="eeGrupo">
+            <option value="promotor">Promotor</option>
+            <option value="liner">Liner</option>
+            <option value="closer">Closer</option>
+          </select>
+        </div>
+        <div class="control-group">
+          <label>Nome (grupo)</label>
+          <select id="eeGrupoNome"><option value="todos">Todos</option></select>
+        </div>
+      </div>
+
+      <div class="stats" id="eeCards"></div>
+
+      <div class="divider"></div>
+
+      <div class="section-title">
+        Clientes + Profissionais <span class="pill-tag">cruzamento</span>
+      </div>
+      <div id="eeClientesTable"></div>
+
+      <div class="divider"></div>
+
+      <div class="section-title">
+        Ranking por profissional <span class="pill-tag">mesmas métricas</span>
+      </div>
+      <div class="note warn" style="margin-top:10px">
+        Se o cliente não for encontrado no <strong>dados.csv</strong>, Promotor/Liner/Closer aparecem como <em>“Não encontrado”</em>.
+      </div>
+      <div id="eeRanking"></div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════
          ABA: DESAFIOS
     ══════════════════════════════════════════════════ -->
     <div id="tab-desafios" class="tab-content">
@@ -1016,7 +1068,11 @@ const KEY = {
   closer  : norm("closer"),
 };
 
-const state   = { rows:[], filtered:[], meta:{ vgvColKey:null, firstColKey:null } };
+const state   = {
+  rows:[], filtered:[],
+  meta:{ vgvColKey:null, firstColKey:null },
+  ee:{ rows:[], filtered:[] }
+};
 const charts  = { curva:null, semana:null, cancelamento:null };
 const sortState = {
   "ranking-promotor"   :{ key:"vendas",    dir:"desc" },
@@ -1200,7 +1256,7 @@ function statsFor(rows){
     eficiencia:eff,pctCancel:q.total?(q.cancelado/q.total):0,
     ticketMedio:q.total?(vgv.total/q.total):0,
     rendaMed:avgRenda(rows),mediaCasaisPeriodo:avgCasais(rows),
-    pctCancelamentosVendas: q.total ? (q.cancelado / q.total) : 0, /* inclusão solicitada */
+    pctCancelamentosVendas: q.total ? (q.cancelado / q.total) : 0,
   };
 }
 
@@ -1732,7 +1788,6 @@ function monthShort(ym){
   return `${mon}/${String(y).slice(2)}`;
 }
 function rowsBaseForMM(){
-  // respeita Status + UF globais; e período global para limitar meses (se houver)
   const status  = el("statusSelect").value;
   const ufSel   = el("ufSelect").value;
   const d1 = parseDateOnlyInput(el("dateStart").value);
@@ -1753,7 +1808,7 @@ function availableMonthsForMM(){
   const base = rowsBaseForMM();
   const set = new Set();
   base.forEach(r=>{ if(r._dt) set.add(monthKey(r._dt)); });
-  return [...set].sort(); // asc
+  return [...set].sort();
 }
 function updateMMNameSelect(){
   const tipo = norm(el("mmProfTipo").value);
@@ -1775,7 +1830,6 @@ function renderMMMonths(){
     return;
   }
 
-  // se seleção está vazia, default: últimos 3
   if(MM.selectedMonths.size===0){
     months.slice(-3).forEach(m=>MM.selectedMonths.add(m));
   }
@@ -1824,7 +1878,6 @@ function renderMMGrid(){
 
   const mine = base.filter(r => norm(r[tipo]??"") === norm(nome));
 
-  // agrupar por mês
   const byMonth = new Map();
   mine.forEach(r=>{
     if(!r._dt) return;
@@ -1870,13 +1923,403 @@ function renderMMGrid(){
   }).join("");
 }
 function renderIndividualMesMes(){
-  // re-render completo da aba (meses + grid)
   renderMMMonths();
   renderMMGrid();
 }
 
 /* ═══════════════════════════════════════════════
+   ENTRADA EFETIVA — PARSE + KPIs + CRUZAMENTO
+═══════════════════════════════════════════════ */
+function parsePctBR(str){
+  if(!str) return 0;
+  const s = String(str).replace("%","").trim().replace(/\./g,"").replace(",",".");
+  const v = parseFloat(s);
+  return Number.isFinite(v) ? (v/100) : 0;
+}
+function parsePeriodoEE(p){
+  const s = (p ?? "").toString().trim().toLowerCase();
+  const m = s.match(/^([a-zç]{3})\/(\d{2})$/i);
+  if(!m) return null;
+  const monMap = { jan:1, fev:2, mar:3, abr:4, mai:5, jun:6, jul:7, ago:8, set:9, out:10, nov:11, dez:12 };
+  const mm = monMap[m[1]];
+  if(!mm) return null;
+  const yy = Number(m[2]);
+  const yyyy = yy >= 70 ? (1900+yy) : (2000+yy);
+  return `${yyyy}-${String(mm).padStart(2,"0")}`;
+}
+function periodoLabelEE(key){
+  if(!key) return "—";
+  const [y,m]=key.split("-").map(Number);
+  const d=new Date(y,(m||1)-1,1);
+  return new Intl.DateTimeFormat("pt-BR",{month:"short",year:"2-digit"}).format(d).replace(".","");
+}
+function parseEntradaEfetivaCSV(text){
+  const lines = text.replace(/\r\n/g,"\n").replace(/\r/g,"\n").split("\n").filter(l=>l.trim());
+  if(!lines.length) return [];
+
+  const parseLine = (line, delimiter=";")=>{
+    const out=[]; let cur="",inQ=false;
+    for(let i=0;i<line.length;i++){
+      const ch=line[i];
+      if(ch==='"'){ if(inQ&&line[i+1]==='"'){cur+='"';i++;} else inQ=!inQ; }
+      else if(ch===delimiter && !inQ){ out.push(cur); cur=""; }
+      else cur+=ch;
+    }
+    out.push(cur);
+    return out.map(v=>v.trim().replace(/^"|"$/g,""));
+  };
+
+  let headerIdx = -1;
+  for(let i=0;i<Math.min(lines.length, 40);i++){
+    const cols = parseLine(lines[i]);
+    if(cols.some(c => norm(c) === norm("Cessionário"))){
+      headerIdx = i;
+      break;
+    }
+  }
+  if(headerIdx < 0) throw new Error("entrada_efetiva.csv: não encontrei o cabeçalho com 'Cessionário'.");
+
+  const headersRaw = parseLine(lines[headerIdx]);
+  const headers = headersRaw.map(h=>norm(h));
+  const data = [];
+
+  for(let i=headerIdx+1;i<lines.length;i++){
+    const vals = parseLine(lines[i]);
+    if(vals.length < 2) continue;
+
+    const row = {};
+    for(let c=0;c<headers.length;c++){
+      row[headers[c]] = (vals[c] ?? "").trim();
+    }
+
+    const cession = (row[norm("Cessionário")] ?? "").toString().trim();
+    if(!cession) continue;
+
+    row._cessionario = cession;
+    row._valorNegociado = parseMoneyBR(row[norm("Valor Negociado")]);
+    row._totParc = Number(String(row[norm("Tot. Parc")] ?? "").replace(/[^\d]/g,"")) || 0;
+    row._valorEntrada = parseMoneyBR(row[norm("Entrada")]);
+
+    const pctFromCol = row[norm("Valor Entrada%")] || row[norm("Valor Entrada %")] || row[norm("Valor Entrada")] || "";
+    row._pctEntrada = parsePctBR(pctFromCol);
+
+    row._qtdEntrada = Number(String(
+      row[norm("Qtd.\nEntrada")] ??
+      row[norm("Qtd. Entrada")] ??
+      row[norm("Qtd.\r\nEntrada")] ??
+      ""
+    ).replace(/[^\d]/g,"")) || 0;
+
+    row._entradaEfetiva = parseMoneyBR(
+      row[norm("Entrada Efetiva")] ||
+      row[norm("Entrada\r\nEfetiva")] ||
+      row[norm("Entrada\nEfetiva")] ||
+      ""
+    );
+
+    const perRaw =
+      row[norm("PERÍODO")] ||
+      row[norm("PERÍODO ")] ||
+      row[norm("PERIODO")] ||
+      row[norm("período")] ||
+      "";
+    row._periodoKey = parsePeriodoEE(perRaw) || null;
+    row._periodoRaw = perRaw;
+
+    data.push(row);
+  }
+
+  return data;
+}
+
+function buildClientToTeamIndexFromDadosCSV(){
+  const idx = new Map();
+
+  const keyNome1 = norm("Nome 1");
+  const keyNome2 = norm("Nome 2");
+  const keyProm  = norm("Promotor de marketing");
+  const keyLin   = norm("Liner");
+  const keyClo   = norm("Closer");
+
+  state.rows.forEach(r=>{
+    const n1 = (r[keyNome1] ?? "").toString().trim();
+    const n2 = (r[keyNome2] ?? "").toString().trim();
+    const prom = (r[keyProm] ?? "").toString().trim();
+    const lin  = (r[keyLin] ?? "").toString().trim();
+    const clo  = (r[keyClo] ?? "").toString().trim();
+
+    const pack = { promotor: prom, liner: lin, closer: clo };
+
+    if(n1) idx.set(norm(n1), pack);
+    if(n2) idx.set(norm(n2), pack);
+    if(n1 && n2) idx.set(norm(`${n1} ${n2}`), pack);
+  });
+
+  return idx;
+}
+
+function findTeamForCessionario(cession, idxMap){
+  const c = (cession ?? "").toString().trim();
+  if(!c) return {promotor:"",liner:"",closer:""};
+
+  const exact = idxMap.get(norm(c));
+  if(exact) return exact;
+
+  const cn = norm(c);
+  for(const [k,v] of idxMap.entries()){
+    if(!k) continue;
+    if(cn.includes(k) || k.includes(cn)) return v;
+  }
+  return {promotor:"Não encontrado", liner:"Não encontrado", closer:"Não encontrado"};
+}
+
+function eeDedup(rows){
+  const seen = new Set();
+  const out = [];
+  for(const r of rows){
+    const k = `${norm(r._cessionario)}|${r._valorNegociado}|${r._periodoKey||""}`;
+    if(seen.has(k)) continue;
+    seen.add(k);
+    out.push(r);
+  }
+  return out;
+}
+
+function eeApplyFilters(){
+  const per = el("eePeriodo")?.value || "todos";
+  const grupo = el("eeGrupo")?.value || "promotor";
+  const nome = el("eeGrupoNome")?.value || "todos";
+
+  let rows = state.ee.rows.slice();
+  if(per !== "todos") rows = rows.filter(r => (r._periodoKey||"") === per);
+
+  // filtro por grupo
+  if(nome !== "todos"){
+    rows = rows.filter(r => {
+      const team = r._team || {};
+      const who = (team[grupo] ?? "").toString().trim();
+      return norm(who) === norm(nome);
+    });
+  }
+
+  state.ee.filtered = rows;
+}
+
+function eeStats(rowsIn){
+  const unique = eeDedup(rowsIn);
+
+  const totalCotas = unique.length;
+  const valorTotal = unique.reduce((s,r)=>s + (r._valorNegociado||0), 0);
+
+  const mediaPctEntrada = unique.length ? unique.reduce((s,r)=>{
+    const p = (r._pctEntrada>0)
+      ? r._pctEntrada
+      : ((r._valorNegociado>0 && r._valorEntrada>0) ? (r._valorEntrada/r._valorNegociado) : 0);
+    return s + p;
+  },0)/unique.length : 0;
+
+  const mediaParcelasEntrada = unique.length ? unique.reduce((s,r)=>s + (r._qtdEntrada||0), 0)/unique.length : 0;
+  const mediaTotalParcelas = unique.length ? unique.reduce((s,r)=>s + (r._totParc||0), 0)/unique.length : 0;
+
+  const somaEntradaEfetiva = unique.reduce((s,r)=>s + (r._entradaEfetiva||0), 0);
+  const pctEntradaEfetiva = valorTotal ? (somaEntradaEfetiva/valorTotal) : 0;
+
+  const mediaParcelasSaldo = unique.length ? unique.reduce((s,r)=>{
+    const t=r._totParc||0;
+    const e=r._qtdEntrada||0;
+    return s + Math.max(0, t - e);
+  },0)/unique.length : 0;
+
+  const cotasSaldoLt36 = unique.filter(r=>{
+    const t=r._totParc||0;
+    const e=r._qtdEntrada||0;
+    return Math.max(0, t-e) < 36;
+  }).length;
+
+  const eeOnly = unique.filter(r => (r._entradaEfetiva||0) > 0);
+  const parcelamentoEntradaEfetiva = eeOnly.length ? eeOnly.reduce((s,r)=>s + (r._qtdEntrada||0), 0)/eeOnly.length : 0;
+
+  return {
+    totalCotas,
+    valorTotal,
+    mediaPctEntrada,
+    mediaParcelasEntrada,
+    pctEntradaEfetiva,
+    mediaTotalParcelas,
+    mediaParcelasSaldo,
+    cotasSaldoLt36,
+    parcelamentoEntradaEfetiva,
+    somaEntradaEfetiva
+  };
+}
+
+function renderEEPeriodoSelect(){
+  const sel = el("eePeriodo");
+  if(!sel) return;
+  const set = new Set();
+  state.ee.rows.forEach(r=>{ if(r._periodoKey) set.add(r._periodoKey); });
+  const arr = [...set].sort();
+  sel.innerHTML = `<option value="todos">Todos</option>` + arr.map(k=>`<option value="${k}">${periodoLabelEE(k)}</option>`).join("");
+}
+
+function renderEEGrupoNomeSelect(){
+  const grupo = el("eeGrupo")?.value || "promotor";
+  const sel = el("eeGrupoNome");
+  if(!sel) return;
+  const set = new Set();
+  state.ee.rows.forEach(r=>{
+    const t = r._team || {};
+    const n = (t[grupo] ?? "").toString().trim();
+    if(n) set.add(n);
+  });
+  const arr=[...set].sort((a,b)=>a.localeCompare(b,"pt-BR",{sensitivity:"base"}));
+  sel.innerHTML = `<option value="todos">Todos</option>` + arr.map(n=>`<option value="${n}">${n}</option>`).join("");
+}
+
+function renderEECards(){
+  eeApplyFilters();
+  const s = eeStats(state.ee.filtered);
+
+  el("eeCards").innerHTML = `
+    <div class="stat-card"><div class="stat-value">${s.totalCotas}</div><div class="stat-label">Total de cotas</div></div>
+    <div class="stat-card"><div class="stat-value">${fmtMoney(s.valorTotal)}</div><div class="stat-label">Valor total</div></div>
+    <div class="stat-card"><div class="stat-value">${fmtNumBR(s.mediaPctEntrada*100,2,2)}%</div><div class="stat-label">Média % entrada</div></div>
+    <div class="stat-card"><div class="stat-value">${fmtNumBR(s.mediaParcelasEntrada,1,1)}x</div><div class="stat-label">Média parcelas entrada</div></div>
+    <div class="stat-card"><div class="stat-value">${fmtNumBR(s.pctEntradaEfetiva*100,2,2)}%</div><div class="stat-label">% Entrada efetiva</div></div>
+
+    <div class="stat-card"><div class="stat-value">${fmtNumBR(s.mediaTotalParcelas,1,1)}x</div><div class="stat-label">Média total parcelas</div></div>
+    <div class="stat-card"><div class="stat-value">${fmtNumBR(s.mediaParcelasSaldo,1,1)}x</div><div class="stat-label">Média parcelas saldo</div></div>
+    <div class="stat-card"><div class="stat-value">${s.cotasSaldoLt36} (${s.totalCotas?fmtNumBR((s.cotasSaldoLt36/s.totalCotas)*100,2,2):"0,00"}%)</div><div class="stat-label">Cotas com saldo &lt; 36x</div></div>
+    <div class="stat-card"><div class="stat-value">${fmtNumBR(s.parcelamentoEntradaEfetiva,1,1)}x</div><div class="stat-label">Parcelamento entrada efetiva</div></div>
+  `;
+}
+
+function renderEEClientesTable(){
+  eeApplyFilters();
+  const unique = eeDedup(state.ee.filtered);
+
+  if(!unique.length){
+    el("eeClientesTable").innerHTML = `<div class="note">Nenhum registro para o filtro.</div>`;
+    return;
+  }
+
+  el("eeClientesTable").innerHTML = `
+    <div class="table-wrap"><table style="min-width:1100px">
+      <thead>
+        <tr>
+          <th>Cliente (Cessionário)</th>
+          <th class="num">Valor negociado</th>
+          <th class="num">Total parc.</th>
+          <th class="num">Entrada</th>
+          <th class="num">Qtd. entrada</th>
+          <th class="num">Entrada efetiva</th>
+          <th>Promotor</th>
+          <th>Liner</th>
+          <th>Closer</th>
+          <th>Período</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${unique.map(r=>{
+          const t = r._team || {promotor:"",liner:"",closer:""};
+          const pct = (r._pctEntrada>0)
+            ? r._pctEntrada
+            : ((r._valorNegociado>0 && r._valorEntrada>0) ? (r._valorEntrada/r._valorNegociado) : 0);
+
+          return `
+            <tr>
+              <td class="name" title="${r._cessionario}">${r._cessionario}</td>
+              <td class="num">${fmtMoney(r._valorNegociado)}</td>
+              <td class="num">${r._totParc || 0}</td>
+              <td class="num">${fmtMoney(r._valorEntrada)} <span class="badge">${fmtNumBR(pct*100,2,2)}%</span></td>
+              <td class="num">${r._qtdEntrada || 0}</td>
+              <td class="num">${fmtMoney(r._entradaEfetiva || 0)}</td>
+              <td>${t.promotor || "—"}</td>
+              <td>${t.liner || "—"}</td>
+              <td>${t.closer || "—"}</td>
+              <td>${r._periodoKey ? periodoLabelEE(r._periodoKey) : (r._periodoRaw || "—")}</td>
+            </tr>
+          `;
+        }).join("")}
+      </tbody>
+    </table></div>
+  `;
+}
+
+function renderEERanking(){
+  eeApplyFilters();
+  const grupo = el("eeGrupo")?.value || "promotor";
+
+  const map = new Map();
+  state.ee.filtered.forEach(r=>{
+    const t=r._team||{};
+    const who=(t[grupo]??"").toString().trim() || "Não encontrado";
+    if(!map.has(who)) map.set(who, []);
+    map.get(who).push(r);
+  });
+
+  const list = [...map.entries()].map(([name,rows])=>{
+    const s = eeStats(rows);
+    return { name, ...s };
+  }).sort((a,b)=> (b.valorTotal-a.valorTotal) || (b.totalCotas-a.totalCotas) || a.name.localeCompare(b.name,"pt-BR",{sensitivity:"base"}));
+
+  if(!list.length){
+    el("eeRanking").innerHTML = `<div class="note">Sem ranking para o filtro atual.</div>`;
+    return;
+  }
+
+  el("eeRanking").innerHTML = `
+    <div class="table-wrap"><table style="min-width:1100px">
+      <thead>
+        <tr>
+          <th style="width:84px">#</th>
+          <th>Profissional <span class="badge">${grupo}</span></th>
+          <th class="num">Cotas</th>
+          <th class="num">Valor total</th>
+          <th class="num">Média % entrada</th>
+          <th class="num">Média parc. entrada</th>
+          <th class="num">% Entrada efetiva</th>
+          <th class="num">Média total parc.</th>
+          <th class="num">Média parc. saldo</th>
+          <th class="num">Saldo &lt; 36x</th>
+          <th class="num">Parcel. ent. efetiva</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${list.map((it,i)=>{
+          const p=i+1,tr=p===1?"🥇":p===2?"🥈":p===3?"🥉":"";
+          return `
+            <tr>
+              <td class="rank-col">${tr} ${p}°</td>
+              <td class="name" title="${it.name}">${it.name}</td>
+              <td class="num">${it.totalCotas}</td>
+              <td class="num">${fmtMoney(it.valorTotal)}</td>
+              <td class="num">${fmtNumBR(it.mediaPctEntrada*100,2,2)}%</td>
+              <td class="num">${fmtNumBR(it.mediaParcelasEntrada,1,1)}x</td>
+              <td class="num">${fmtNumBR(it.pctEntradaEfetiva*100,2,2)}%</td>
+              <td class="num">${fmtNumBR(it.mediaTotalParcelas,1,1)}x</td>
+              <td class="num">${fmtNumBR(it.mediaParcelasSaldo,1,1)}x</td>
+              <td class="num">${it.cotasSaldoLt36} (${it.totalCotas?fmtNumBR((it.cotasSaldoLt36/it.totalCotas)*100,2,2):"0,00"}%)</td>
+              <td class="num">${fmtNumBR(it.parcelamentoEntradaEfetiva,1,1)}x</td>
+            </tr>
+          `;
+        }).join("")}
+      </tbody>
+    </table></div>
+  `;
+}
+
+function renderEntradaEfetivaAll(){
+  renderEEPeriodoSelect();
+  renderEEGrupoNomeSelect();
+  renderEECards();
+  renderEEClientesTable();
+  renderEERanking();
+}
+
+/* ═══════════════════════════════════════════════
    DESAFIOS (CRUD + APURAÇÃO)
+   (mantido como estava no seu arquivo)
 ═══════════════════════════════════════════════ */
 let currentChallengeId = null;
 
@@ -1945,8 +2388,6 @@ function renderChallengeTeamsEditor(){
 
   const teamsCount = Number(el("chTeamsCount").value)||2;
 
-  // se estiver criando novo (ainda não salvo), renderiza com base nos inputs (sem storage)
-  // mas para simplificar: quando não existe no storage, usamos um objeto temporário.
   const tmp = ch ? structuredClone(ch) : newChallengeTemplate();
   tmp.profTipo = tipo;
   ensureTeamsCount(tmp, teamsCount);
@@ -1955,7 +2396,6 @@ function renderChallengeTeamsEditor(){
   tmp.teams.forEach(t=>t.members.forEach(m=>used.add(norm(m))));
 
   el("chTeamsEditor").innerHTML = tmp.teams.map((t,idx)=>{
-    const teamId = `t${idx}`;
     return `
       <div class="team-box" data-team-index="${idx}">
         <div class="hdr">
@@ -1987,8 +2427,6 @@ function renderChallengeTeamsEditor(){
     `;
   }).join("");
 
-  // listeners (inputs/checkboxes) -> atualiza objeto no storage (se existir) ou um draft em memória via dataset
-  // Implementação: gravar direto no storage quando currentChallengeId existe; caso contrário, só atualiza UI e salvar na hora.
   el("chTeamsEditor").querySelectorAll("input[data-team-name]").forEach(inp=>{
     inp.addEventListener("input", ()=>{
       if(!currentChallengeId) return;
@@ -2009,17 +2447,13 @@ function renderChallengeTeamsEditor(){
       const tIdx = Number(cb.dataset.teamMember);
       const member = decodeURIComponent(cb.dataset.member);
 
-      // atualiza no storage se editando existente; senão ignora (vai ser lido ao salvar)
       if(currentChallengeId){
         const arr=loadChallenges();
         const ch=arr.find(x=>x.id===currentChallengeId);
         if(!ch) return;
         ensureTeamsCount(ch, Number(el("chTeamsCount").value)||2);
 
-        // remove de todas as equipes (garante exclusividade)
         ch.teams.forEach(t=>t.members = (t.members||[]).filter(x=>norm(x)!==norm(member)));
-
-        // adiciona se checked
         if(cb.checked){
           ch.teams[tIdx].members.push(member);
         }
@@ -2027,7 +2461,6 @@ function renderChallengeTeamsEditor(){
         saveChallenges(arr);
       }
 
-      // re-render para aplicar disable/contadores
       renderDesafios(false);
     });
   });
@@ -2043,28 +2476,23 @@ function readChallengeFromForm(){
 
   const names = listNamesByTipo(profTipo);
 
-  // montar times lendo editor atual (inputs/checkboxes)
   const teams = [];
   for(let i=0;i<teamsCount;i++){
     teams.push({ name:`Equipe ${i+1}`, members:[] });
   }
-  // nomes
   document.querySelectorAll("#chTeamsEditor input[data-team-name]").forEach(inp=>{
     const idx=Number(inp.dataset.teamName);
     if(Number.isFinite(idx) && teams[idx]) teams[idx].name = (inp.value||`Equipe ${idx+1}`).trim() || `Equipe ${idx+1}`;
   });
-  // membros
   document.querySelectorAll("#chTeamsEditor input[type='checkbox'][data-team-member]").forEach(cb=>{
     if(!cb.checked) return;
     const tIdx=Number(cb.dataset.teamMember);
     const member=decodeURIComponent(cb.dataset.member);
     if(!teams[tIdx]) return;
-    // valida membro existir na lista do tipo (evita lixo)
     if(!names.some(n=>norm(n)===norm(member))) return;
     teams[tIdx].members.push(member);
   });
 
-  // garantir exclusividade (caso alguma checagem tenha escapado)
   const seen=new Set();
   teams.forEach(t=>{
     t.members = t.members.filter(m=>{
@@ -2123,16 +2551,13 @@ function challengeMetricValue(ch, rowsForTeam){
   switch(ch.metric){
     case "casais": return { val: s.casais, fmt: v=>String(v|0) };
     case "vgv": return { val: s.vgvTotal, fmt: fmtMoney };
-    case "casais_atendidos":
-      // aqui interpretamos como "linhas totais" (inclui NoTour)
-      return { val: s.totalLinhas, fmt: v=>String(v|0) };
+    case "casais_atendidos": return { val: s.totalLinhas, fmt: v=>String(v|0) };
     case "eficiencia": return { val: s.eficiencia, fmt: fmtPctBR };
     default: return { val: s.casais, fmt: v=>String(v|0) };
   }
 }
 
 function applyFiltersForChallengeBase(rows){
-  // desafio: IGNORA período global; respeita status e UF globais
   const status  =el("statusSelect").value;
   const ufSel   =el("ufSelect").value;
   let f=rows.slice();
@@ -2147,7 +2572,6 @@ function renderChallengeResults(ch){
   const base = applyFiltersForChallengeBase(state.rows);
   const inPeriod = filterByRange(base, ch.start, ch.end);
 
-  // agrupar por time, filtrando por profissional do tipo escolhido
   const tipoKey = norm(ch.profTipo||norm("promotor de marketing"));
   const teams = Array.isArray(ch.teams)?ch.teams:[];
   const results = teams.map(t=>{
@@ -2171,7 +2595,6 @@ function renderChallengeResults(ch){
     };
   });
 
-  // ordenar por valor (desc), desempate por nome
   const sorted = results.slice().sort((a,b)=>{
     const av = (typeof a.valor==="number")?a.valor:0;
     const bv = (typeof b.valor==="number")?b.valor:0;
@@ -2233,11 +2656,9 @@ function renderChallengeResults(ch){
     </div>
   `;
 
-  // sort (simples) para tabela de desafios
   el("chResults").querySelectorAll("thead th.sortable").forEach(th=>{
     th.addEventListener("click", ()=>{
       setSort("ch-results-table", th.dataset.sort);
-      // aplicar sortState manualmente
       const st = sortState["ch-results-table"] || {key:"valor",dir:"desc"};
       const again = results.slice().sort((a,b)=>{
         const key = st.key;
@@ -2252,7 +2673,6 @@ function renderChallengeResults(ch){
         return dir==="asc" ? baseCmp : -baseCmp;
       });
 
-      // re-render só o tbody rapidamente
       const tbody = el("chResults").querySelector("tbody");
       tbody.innerHTML = again.map((r,i)=>{
         const pos=i+1;
@@ -2278,7 +2698,6 @@ function renderChallengeResults(ch){
 }
 
 function renderDesafios(recalcTeamsEditor=true){
-  // lista
   const arr = loadChallenges().sort((a,b)=>(b.updatedAt||0)-(a.updatedAt||0));
   el("chList").innerHTML = arr.length ? arr.map(ch=>{
     const active = (ch.id===currentChallengeId);
@@ -2314,7 +2733,6 @@ function renderDesafios(recalcTeamsEditor=true){
       const ch=loadChallenges().find(x=>x.id===id);
       if(!ch) return;
       currentChallengeId = id;
-      // mantém form como está (se não estava editando), mas mostra apuração
       renderChallengeResults(ch);
       renderDesafios(false);
     });
@@ -2327,10 +2745,8 @@ function renderDesafios(recalcTeamsEditor=true){
     });
   });
 
-  // editor de equipes
   if(recalcTeamsEditor) renderChallengeTeamsEditor();
 
-  // apuração do selecionado
   const current = currentChallengeId ? loadChallenges().find(x=>x.id===currentChallengeId) : null;
   renderChallengeResults(current);
 }
@@ -2353,10 +2769,13 @@ function updateAll(){
   renderEquipes();
   renderSupervisores();
   renderComparativo();
-  renderDesafios(false); // desafios respeitam status/UF globais na apuração
-
-  // NOVA ABA: mês/mês depende dos filtros globais
+  renderDesafios(false);
   renderIndividualMesMes();
+
+  // Entrada efetiva não depende do updateAll (usa seus filtros), mas manter atualizado se necessário
+  if(document.querySelector(".tab.active")?.dataset?.tab === "entrada-efetiva"){
+    renderEntradaEfetivaAll();
+  }
 }
 
 /* ═══════════════════════════════════════════════
@@ -2380,11 +2799,10 @@ function setup(){
   el("profTipoSingle").addEventListener("change",()=>{ updateProfFilters("profTipoSingle","profNomeSingle"); renderSingle(); });
   el("profNomeSingle").addEventListener("change",renderSingle);
 
-  /* NOVA ABA: mês/mês */
+  /* mês/mês */
   el("mmProfTipo").addEventListener("change", ()=>{
     updateMMNameSelect();
     el("mmProfNome").value = "";
-    // mantém meses selecionados, mas re-render
     renderIndividualMesMes();
   });
   el("mmProfNome").addEventListener("change", renderIndividualMesMes);
@@ -2406,6 +2824,16 @@ function setup(){
     const months=availableMonthsForMM();
     MM.selectedMonths = new Set(months.slice(-6));
     renderIndividualMesMes();
+  });
+
+  /* Entrada Efetiva */
+  ["eePeriodo","eeGrupo","eeGrupoNome"].forEach(id=>{
+    const node = el(id);
+    if(!node) return;
+    node.addEventListener("change", ()=>{
+      if(id==="eeGrupo") renderEEGrupoNomeSelect();
+      renderEntradaEfetivaAll();
+    });
   });
 
   /* equipes */
@@ -2447,7 +2875,6 @@ function setup(){
       const ch=arr.find(x=>x.id===currentChallengeId);
       if(ch){
         ch.profTipo = norm(el("chProfTipo").value);
-        // ao trocar tipo, limpa membros (para evitar membros inexistentes)
         ch.teams.forEach(t=>t.members=[]);
         ch.updatedAt = Date.now();
         saveChallenges(arr);
@@ -2487,7 +2914,6 @@ function setup(){
       showChMsg("Informe o período (início e fim) do desafio.", "warn"); return;
     }
 
-    // valida: não permitir equipe vazia? (vou permitir, mas avisar)
     const emptyTeams = form.teams.filter(t=>(t.members||[]).length===0).length;
     if(emptyTeams>0){
       if(!confirm("Existem equipes sem membros. Deseja salvar assim mesmo?")) return;
@@ -2514,7 +2940,6 @@ function setup(){
     ch.metric = form.metric;
     ch.profTipo = form.profTipo;
     ensureTeamsCount(ch, form.teamsCount);
-    // aplica nomes e membros
     ch.teams.forEach((t,i)=>{
       t.name = (form.teams[i]?.name || `Equipe ${i+1}`).trim() || `Equipe ${i+1}`;
       t.members = (form.teams[i]?.members || []).slice();
@@ -2544,18 +2969,20 @@ function setup(){
         setTimeout(()=>{ try{charts.curva?.resize?.();charts.semana?.resize?.();charts.cancelamento?.resize?.();}catch(e){} },80);
       }
       if(t.dataset.tab==="desafios"){
-        // garante render atual no abrir
         renderDesafios(true);
       }
       if(t.dataset.tab==="individual-mes-mes"){
         renderIndividualMesMes();
+      }
+      if(t.dataset.tab==="entrada-efetiva"){
+        renderEntradaEfetivaAll();
       }
     });
   });
 }
 
 /* ═══════════════════════════════════════════════
-   INIT — fetch dados.csv
+   INIT — fetch dados.csv + entrada_efetiva.csv
 ═══════════════════════════════════════════════ */
 async function init(){
   try{
@@ -2566,6 +2993,18 @@ async function init(){
     if(!resp.ok) throw new Error(`HTTP ${resp.status} — verifique se dados.csv está na mesma pasta do index.html`);
     const text=await resp.text();
     state.rows=buildObjects(parseDelimited(text,";"));
+
+    // carregar entrada_efetiva.csv
+    const respEE = await fetch("entrada_efetiva.csv", { cache:"no-store" });
+    if(!respEE.ok) throw new Error(`HTTP ${respEE.status} — verifique se entrada_efetiva.csv está na mesma pasta do index.html`);
+    const textEE = await respEE.text();
+    state.ee.rows = parseEntradaEfetivaCSV(textEE);
+
+    // cruzar promotor/liner/closer
+    const idxTeam = buildClientToTeamIndexFromDadosCSV();
+    state.ee.rows.forEach(r=>{
+      r._team = findTeamForCessionario(r._cessionario, idxTeam);
+    });
 
     updateProfFilters("profTipo","profNome");
     updateProfFilters("profTipoSingle","profNomeSingle");
@@ -2578,13 +3017,15 @@ async function init(){
     el("cmpXStart").value=toISO(sX); el("cmpXEnd").value=toISO(e);
     el("cmpYStart").value=toISO(sY); el("cmpYEnd").value=toISO(eY);
 
-    // init desafios
-    resetChallengeForm(); // prepara editor
+    resetChallengeForm();
     renderDesafios(true);
 
-    // init nova aba mês/mês
     updateMMNameSelect();
     MM.selectedMonths.clear();
+
+    // init Entrada Efetiva selects
+    renderEEPeriodoSelect();
+    renderEEGrupoNomeSelect();
 
     updateAll();
     el("loading").style.display="none";
